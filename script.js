@@ -13,12 +13,11 @@
 })();
 
 const imgHost = {
-    type: "LskyPro", // 图床类型, 仅支持 LskyPro / EasyImages
-    url: "https://image.dooo.ng", // 图床地址, 带上协议头
-    token: "", // LskyPro 可为空则使用游客上传, 在 /user/tokens 生成
-    copyFormat: "markdown" // 默认为URL格式
+    type: "Moorli", // 默认改为你的新图床
+    url: "https://img.moorli.de", 
+    token: "", 
+    copyFormat: "markdown"
 };
-
 // 汇率缓存（用于 Komari CNY 换算）
 let __ratesCache = null; // { rates: {...}, timestamp: number }
 async function ensureRates() {
