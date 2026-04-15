@@ -732,7 +732,10 @@ function uploadImage(imageData) {
     const file = new File([blob], "calculator-result.png", {type: mimeType});
     
     // 根据图床类型选择不同的上传方法
-    switch(imgHost.type) {
+   switch(imgHost.type) {
+        case 'Moorli': // 新增支持
+            uploadToMoorli(file);
+            break;
         case 'LskyPro':
             uploadToLskyPro(file);
             break;
@@ -740,7 +743,7 @@ function uploadImage(imageData) {
             uploadToEasyImages(file);
             break;
         default:
-            showNotification(`不支持的图床类型: ${imgHost.type}，请设置为 LskyPro 或 EasyImages`, 'error');
+            showNotification(`不支持的图床类型: ${imgHost.type}`, 'error');
     }
 }
 
@@ -860,7 +863,60 @@ function uploadToEasyImages(file) {
         showNotification('上传图片失败，请重试', 'error');
     });
 }
+/**
+ * 上传到 Moorli 图床
+ * @param {File} file - 要上传的文件
+ */
+function uploadToMoorli(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    const headers = {};
+    let uploadUrl = '';
 
+    // 判断是私有还是公共上传
+    if (imgHost.token) {
+        uploadUrl = 'https://img.moorli.de/api/upload/private';
+        headers['X-API-Key'] = imgHost.token; // 对应文档中的 X-API-Key
+    } else {
+        uploadUrl = 'https://img.moorli.de/api/upload/public';
+    }
+
+    fetch(uploadUrl, {
+        method: 'POST',
+        headers: headers,
+        body: formData
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+        return response.json();
+    })
+    .then(result => {
+        // 根据你提供的 JSON 格式：result.success 为 true，URL 在 result.data.url
+        if (result.success === true && result.data && result.data.url) {
+            const imageUrl = result.data.url;
+            let clipboardText = imageUrl;
+            
+            if (imgHost.copyFormat === 'markdown') {
+                clipboardText = `![剩余价值计算结果](${imageUrl})`;
+            }
+            
+            copyToClipboard(clipboardText);
+            
+            const formatText = imgHost.copyFormat === 'markdown' ? 'Markdown格式' : '链接';
+            showNotification(`截图上传成功，${formatText}已复制到剪贴板！`, 'success');
+        } else {
+            showNotification('图片上传失败: ' + (result.message || '未知错误'), 'error');
+            console.error('上传响应异常:', result);
+        }
+    })
+    .catch(error => {
+        console.error('上传图片失败:', error);
+        showNotification('上传图片失败，请检查网络或配置', 'error');
+    });
+}
 
 
 
