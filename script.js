@@ -18,23 +18,58 @@ const imgHost = {
     token: "", 
     copyFormat: "markdown"
 };
-// 汇率缓存（用于 Komari CNY 换算）
-let __ratesCache = null; // { rates: {...}, timestamp: number }
+// 汇率数据源：按优先级依次尝试，任一可用即可。
+// 原 https://throbbing-sun-9eb6.b7483311.workers.dev 已下线（所有路径 404），故改为直连公开汇率源。
+// 三者返回的 rates 均以 USD 为基准，因此后续按 rates[币种] 互相换算不受基准影响。
+const RATE_SOURCES = [
+    {
+        name: 'open.er-api.com',
+        url: 'https://open.er-api.com/v6/latest/USD',
+        parse: d => ({ rates: d.rates, timestamp: d.time_last_update_unix * 1000 })
+    },
+    {
+        name: 'api.exchangerate-api.com',
+        url: 'https://api.exchangerate-api.com/v4/latest/USD',
+        parse: d => ({ rates: d.rates, timestamp: d.time_last_updated * 1000 })
+    },
+    {
+        name: 'api.frankfurter.app',
+        url: 'https://api.frankfurter.app/latest?from=USD',
+        parse: d => ({ rates: d.rates, timestamp: Date.parse(d.date) })
+    }
+];
+
+// 汇率缓存 { rates: {...}, timestamp: number }
+let __ratesCache = null;
+
+async function loadRates(force = false) {
+    if (!force && __ratesCache && Date.now() - __ratesCache.timestamp < 30 * 60 * 1000) {
+        return __ratesCache;
+    }
+    for (const src of RATE_SOURCES) {
+        try {
+            const res = await fetch(src.url, { cache: 'no-store' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const parsed = src.parse(data) || {};
+            if (!parsed.rates || !parsed.rates.CNY) throw new Error('rates 缺失');
+            // 所有源都以 USD 为基准，部分源（如 frankfurter）不返回基准币自身，补成 1
+            if (!parsed.rates.USD) parsed.rates.USD = 1;
+            __ratesCache = {
+                rates: parsed.rates,
+                timestamp: Number(parsed.timestamp) || Date.now()
+            };
+            return __ratesCache;
+        } catch (e) {
+            console.warn(`[汇率] ${src.name} 获取失败：`, e);
+        }
+    }
+    return null;
+}
+
 async function ensureRates() {
-    if (__ratesCache && Date.now() - __ratesCache.timestamp < 30 * 60 * 1000) {
-        return __ratesCache.rates;
-    }
-    try {
-        const res = await fetch(`https://throbbing-sun-9eb6.b7483311.workers.dev`);
-        if (!res.ok) throw new Error('rate http error');
-        const data = await res.json();
-        if (!data || !data.rates) throw new Error('rate format error');
-        __ratesCache = { rates: data.rates, timestamp: Date.now() };
-        return __ratesCache.rates;
-    } catch (e) {
-        console.warn('获取汇率失败（CNY换算将不可用）', e);
-        return null;
-    }
+    const cache = await loadRates();
+    return cache ? cache.rates : null;
 }
 
 function normalizeCurrencyCode(input, region = '') {
@@ -431,50 +466,51 @@ function updateRemainingDays() {
 /**
  * 实时汇率获取 @pengzhile
  * 代码来源: https://linux.do/t/topic/227730/27
- * 
+ *
  * 该函数用于从API获取最新汇率并计算与人民币的兑换比率
+ * 数据源与降级顺序见文件顶部的 RATE_SOURCES
  */
-function fetchExchangeRate(isFromUrlLoad = false) {
+async function fetchExchangeRate(isFromUrlLoad = false) {
   const currency = document.getElementById('currency').value;
   const customRateField = document.getElementById('customRate');
-  
-  return fetch(`https://throbbing-sun-9eb6.b7483311.workers.dev`)
-  .then(response => {
-    if (!response.ok) {
-      throw new Error(`HTTP error! 状态: ${response.status}`);
-    }
-    return response.json();
-  })
-  .then(data => {
-    const originRate = data.rates[currency];
-    const targetRate = data.rates.CNY;
-    const rate = targetRate/originRate;
-	
-    const utcDate = new Date(data.timestamp);
-    const eastEightTime = new Date(utcDate.getTime() + (8 * 60 * 60 * 1000));
+  const exchangeRateField = document.getElementById('exchangeRate');
 
-    const year = eastEightTime.getUTCFullYear();
-    const month = String(eastEightTime.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(eastEightTime.getUTCDate()).padStart(2, '0');
-    const hours = String(eastEightTime.getUTCHours()).padStart(2, '0');
-    const minutes = String(eastEightTime.getUTCMinutes()).padStart(2, '0');
-    
-    const formattedDate = `${year}/${month}/${day} ${hours}:${minutes}`;
-    
-    document.getElementById('exchangeRate').value = rate.toFixed(3);
-    
-    const urlParams = new URLSearchParams(window.location.search);
-    if (!isFromUrlLoad || !urlParams.has('rate')) {
-        customRateField.value = rate.toFixed(3);
-    }
-
-    const exchangeRateField = document.getElementById('exchangeRate');
-    exchangeRateField.setAttribute('supporting-text', `更新时间: ${formattedDate}`);
-  })
-  .catch(error => {
-    console.error('Error fetching the exchange rate:', error);
+  const cache = await loadRates(true);
+  if (!cache) {
+    console.error('Error fetching the exchange rate: 所有汇率源均不可用');
     showNotification('获取汇率失败，请稍后再试。', 'error');
-  });
+    return;
+  }
+
+  const originRate = cache.rates[currency];
+  const targetRate = cache.rates.CNY;
+  if (!originRate || !targetRate) {
+    console.error('Error fetching the exchange rate: 缺少币种', currency);
+    showNotification(`未获取到 ${currency} 的汇率，请手动填写自定汇率。`, 'error');
+    return;
+  }
+
+  const rate = targetRate / originRate;
+
+  const utcDate = new Date(cache.timestamp);
+  const eastEightTime = new Date(utcDate.getTime() + (8 * 60 * 60 * 1000));
+
+  const year = eastEightTime.getUTCFullYear();
+  const month = String(eastEightTime.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(eastEightTime.getUTCDate()).padStart(2, '0');
+  const hours = String(eastEightTime.getUTCHours()).padStart(2, '0');
+  const minutes = String(eastEightTime.getUTCMinutes()).padStart(2, '0');
+
+  const formattedDate = `${year}/${month}/${day} ${hours}:${minutes}`;
+
+  exchangeRateField.value = rate.toFixed(3);
+
+  const urlParams = new URLSearchParams(window.location.search);
+  if (!isFromUrlLoad || !urlParams.has('rate')) {
+      customRateField.value = rate.toFixed(3);
+  }
+
+  exchangeRateField.setAttribute('supporting-text', `更新时间: ${formattedDate}`);
 }
 
 function setDefaultTransactionDate() {
